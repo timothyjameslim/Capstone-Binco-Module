@@ -22,11 +22,14 @@ add_executable(binco.elf
         port/wizchip_port_pico.h
         drivers/w5500_net.cpp
         drivers/w5500_net.h
+        drivers/lcd1602.cpp
+        drivers/lcd1602.h
 )
 
 target_link_libraries(binco.elf
         pico_stdlib
         hardware_spi
+        hardware_i2c
 )
 
 pico_enable_stdio_usb(binco.elf 1)

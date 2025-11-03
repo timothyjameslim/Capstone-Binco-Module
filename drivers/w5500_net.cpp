@@ -5,12 +5,10 @@
 
 // drivers/w5500_net.cpp
 #include "pico/stdlib.h"
-#include "../pinouts.h"
 #include "../port/wizchip_port_pico.h"   // your port init
 
 extern "C" {
 #include "../drivers/wizchip_conf.h"
-#include "../drivers/w5500.h"
 }
 
 extern "C" int w5500_init(void){
@@ -29,7 +27,7 @@ extern "C" int w5500_init(void){
             .mac  = {0x00,0x08,0xDC,0x11,0x22,0x33},
             .ip   = {192,168,1,120},
             .sn   = {255,255,255,0},
-            .gw   = {192,168,1,1},
+            .gw   = {0,0,0,0},
             .dns  = {8,8,8,8},
             .dhcp = NETINFO_STATIC,
     };
@@ -37,6 +35,7 @@ extern "C" int w5500_init(void){
 
     // 4) Sanity: Version Check
     uint8_t ver = getVERSIONR();
+    stdio_printf("W5500 version = 0x%02X\n", ver);
     if(ver!=0x04){
         return 0;
     }

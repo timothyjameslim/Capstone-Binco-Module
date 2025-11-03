@@ -21,8 +21,10 @@
 // On-board LED
 #define PIN_LED            25
 
-// VBUS / power sense (optional)
-#define PIN_VBUS_SENSE     24
-#define PIN_ADC_VSYS       29
+// Waveshare LCD1602
+//GPIO 10
+#define LCD_SDA            10
+// GPIO 11
+#define LCD_SCL            11
 
 #endif //BINCO_PINOUTS_H
