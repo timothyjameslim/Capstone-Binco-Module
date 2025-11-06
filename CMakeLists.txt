@@ -24,6 +24,8 @@ add_executable(binco.elf
         drivers/w5500_net.h
         drivers/lcd1602.cpp
         drivers/lcd1602.h
+        drivers/adc.cpp
+        drivers/adc.h
 )
 
 target_link_libraries(binco.elf

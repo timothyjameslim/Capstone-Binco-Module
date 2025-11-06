@@ -7,7 +7,6 @@
 
 // I2C
 static constexpr i2c_inst_t *LCD_I2C = i2c1;
-// change if your scan shows 0x3F or 0x20
 static constexpr uint8_t LCD_ADDR = 0x27;
 
 LCD1602::LCD1602()
