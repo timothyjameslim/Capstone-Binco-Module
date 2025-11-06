@@ -10,8 +10,8 @@ include(${PICO_SDK_PATH}/external/pico_sdk_import.cmake)
 pico_sdk_init()
 
 add_executable(binco.elf
-        main.cpp
-        pinouts.h
+        src/main.cpp
+        src/pinouts.h
         drivers/w5500.c
         drivers/w5500.h
         port/wizchip_port_pico.cpp

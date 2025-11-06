@@ -4,7 +4,7 @@
 #include "hardware/gpio.h"
 #include "hardware/sync.h"
 
-#include "../pinouts.h"
+#include "../src/pinouts.h"
 extern "C" {
 #include "../drivers/wizchip_conf.h"
 }
