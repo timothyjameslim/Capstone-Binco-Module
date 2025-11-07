@@ -5,10 +5,12 @@
 
 // drivers/w5500_net.cpp
 #include "pico/stdlib.h"
+#include "../pinouts.h"
 #include "../port/wizchip_port_pico.h"   // your port init
 
 extern "C" {
 #include "../drivers/wizchip_conf.h"
+#include "../drivers/w5500.h"
 }
 
 extern "C" int w5500_init(void){
@@ -24,11 +26,11 @@ extern "C" int w5500_init(void){
 
     // 3) Set network parameters
     wiz_NetInfo net = {
-            .mac  = {0x00,0x08,0xDC,0x11,0x22,0x33},
-            .ip   = {192,168,1,120},
+            .mac  = {0x00,0x08,0xDC,0x11,0x22,0x44},
+            .ip   = {192,168,1,121},
             .sn   = {255,255,255,0},
-            .gw   = {0,0,0,0},
-            .dns  = {8,8,8,8},
+            .gw   = {192,168,1,121},
+            .dns  = {192,168,1,121},
             .dhcp = NETINFO_STATIC,
     };
     ctlnetwork(CN_SET_NETINFO, &net);

@@ -24,8 +24,12 @@ add_executable(binco.elf
         drivers/w5500_net.h
         drivers/lcd1602.cpp
         drivers/lcd1602.h
-        drivers/adc.cpp
-        drivers/adc.h
+)
+
+# tell the target where to find your own headers
+target_include_directories(binco.elf PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}/drivers
+        ${CMAKE_CURRENT_LIST_DIR}/port
 )
 
 target_link_libraries(binco.elf
