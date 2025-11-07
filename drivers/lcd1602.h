@@ -8,7 +8,7 @@
 #pragma once
 #include <string>
 #include "pico/stdlib.h"
-#include "../src/pinouts.h"
+#include "../pinouts.h"
 
 class LCD1602 {
 public:

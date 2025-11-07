@@ -2,10 +2,10 @@
 #include <cstring>     // for memcmp
 #include <cstdio>      // for snprintf
 #include "pinouts.h"
-#include "../drivers/w5500.h"
-#include "../drivers/w5500_net.h"
-#include "../drivers/socket.h"
-#include "../drivers/lcd1602.h"
+#include "drivers/w5500.h"
+#include "drivers/w5500_net.h"
+#include "drivers/socket.h"
+#include "drivers/lcd1602.h"
 
 //Establish the struct data to be sent over udp
 struct __attribute__((packed)) BinData {
