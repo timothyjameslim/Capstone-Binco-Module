@@ -26,6 +26,9 @@ add_executable(binco.elf
         drivers/lcd1602.h
         drivers/Adafruit_NAU7802.cpp
         drivers/Adafruit_NAU7802.h
+        drivers/adc_service.cpp
+        drivers/adc_service.h
+
 )
 
 # tell the target where to find your own headers

@@ -1,6 +1,6 @@
 #include "pico/stdlib.h"
-#include <cstring>     // for memcmp
-#include <cstdio>      // for snprintf
+#include <cstring>
+#include <cstdio>
 #include "pinouts.h"
 #include "drivers/w5500.h"
 #include "drivers/w5500_net.h"
@@ -8,150 +8,151 @@
 #include "drivers/lcd1602.h"
 #include "drivers/Adafruit_NAU7802.h"
 #include "hardware/i2c.h"
+#include "adc_service.h"
 
-
-//Establish the struct data to be sent over udp
+// UDP payload
 struct __attribute__((packed)) BinData {
     char     name[16];
     uint16_t ID;
     uint16_t quantity;
-    uint16_t weight;
+    float    weight_g;      // now send grams directly
 };
 
-//debug helpers declaration
-void i2c_scan_except(i2c_inst_t *bus, uint8_t skip_addr);
+// debug helpers
 void wait_for_one(void);
 
 int main() {
-
     stdio_init_all();
     sleep_ms(500);
-
 
     LCD1602 lcd;
     lcd.init();
 
-    //Standby for ADC initialization and calibration
+    // optional debug gate
     wait_for_one();
-    NAU7802 adc(i2c1, ADC_SDA, ADC_SCL, 0x2A);
 
-    if (!adc.begin()) {
+    /* ---------------------------- ADC SHIT ---------------------------- */
+    // low-level ADC + high-level service
+    NAU7802 nau(i2c1, ADC_SDA, ADC_SCL, 0x2A);
+
+    if (!nau.begin()) {
         printf("NAU7802 init failed\n");
-        while (true) {
-            sleep_ms(1000);
-        }
+        while (true) { sleep_ms(1000); }
+    }
+    printf("NAU7802 Working!\n");
+    nau.setGain(6);
+    nau.setRate(4);
+
+    printf("Calibrating with zero weight\n");
+    int32_t cali = 0;
+    for (int i=0; i<64; i++){
+        cali += nau.read();
+        sleep_ms(10);
+    }
+    cali /= 64;
+    printf("Cali = %ld\n",cali);
+
+    printf("Calibrating with 6.56g weight, press 1 when ready\n");
+    wait_for_one();
+
+    printf("Taring\n");
+    int32_t cali2 = 0;
+    for (int i=0; i<64; i++){
+        cali2 += nau.read();
+    }
+    cali2 /= 64;
+    printf("reTARED, Tare = %fd\n", cali2);
+
+    int32_t delta_counts = cali2 - cali;
+
+    if (delta_counts == 0) {
+        printf("ERROR: delta_counts = 0 (weight not detected!)\n");
+        while (true) sleep_ms(750);
     }
 
-    adc.calibrate();
+    float slope  = 6.56f / (float)delta_counts;
+    float offset = 0.0f;    // offset is handled by raw_zero
 
-    // i2c_scan_except(i2c1, 0); //all addresses are found and correct
+    printf("Calibration done: slope=%f  (grams per count)\n", slope);
 
-    // init W5500
+    nau.setGain(5);
+    nau.setRate(3);
+
+    wait_for_one();
+
+    /* ---------------------------- W5500 ---------------------------- */
     if (!w5500_init()) {
-        while (true) {
-            sleep_ms(500);
-        }
+        while (true) { sleep_ms(250); }
     }
 
-    // open udp socket 0 on local port 5000
     const uint8_t sock = 0;
-    if (socket(sock, Sn_MR_UDP, 5000, 0) != sock) {
-        while (true) {
-            sleep_ms(500);
-        }
+    if (socket(sock, Sn_MR_UDP, 5001, 0) != sock) {
+        while (true) { sleep_ms(250); }
     }
 
-    // destination
-    uint8_t  dst_ip[4] = {192, 168, 1, 121};
+    uint8_t  dst_ip[4] = {192, 168, 10, 1};
     uint16_t dst_port  = 5001;
 
-    // current data
     BinData d{};
     const char nm[] = "Binco1";
-    for (int i = 0; i < 16 && nm[i]; ++i) {
-        d.name[i] = nm[i];
-    }
-    d.ID = 01;
+    for (int i = 0; i < 16 && nm[i]; ++i) d.name[i] = nm[i];
+    d.ID       = 1;
     d.quantity = 1;
-    d.weight   = 0;
+    d.weight_g = 0.0f;
 
-    // last data for change detection
     BinData last = d;
 
-    // initial LCD draw
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print(d.name);
-    lcd.setCursor(0, 1);
+    // initial LCD
     {
-        // first line: name (left) and ID (right)
         char line0[17];
         snprintf(line0, sizeof(line0), "%-11sID:%02u", d.name, d.ID);
+        lcd.clear();
         lcd.setCursor(0, 0);
         lcd.print(line0);
 
-        // second line: quantity and weight
         char line1[17];
-        snprintf(line1, sizeof(line1), "Qty:%u    W:%u", d.quantity, d.weight);
+        snprintf(line1, sizeof(line1), "Qty:%u  W:%.1f", d.quantity, d.weight_g);
         lcd.setCursor(0, 1);
         lcd.print(line1);
     }
 
     while (true) {
-        // 1) Read Loadcell ADC
-        int32_t raw = adc.read();          // blocking until data ready
-        printf("Raw Loadcell reading from ADC: %ld\n", raw);
+        // 1. get latest weight in grams (internally averages, tares, etc.)
+        int32_t raw = nau.read();
+        int32_t net = raw - cali;
+        d.weight_g = net * slope;
 
-        if (raw < 0) {
-            raw = 0;                       // simple clamp for now
-        }
+        printf("raw=%d  net=%d  grams=%.2f\n", raw, net, d.weight_g);
 
-        // 2) convert to uint16_t for packet
-        uint16_t weight_u16 = (raw > 65535) ? 65535 : (uint16_t)raw;
-        d.weight = weight_u16;
-
-        sleep_ms(1000);
-
-        // send struct over UDP
+        // 2. send over UDP
         sendto(sock,
                reinterpret_cast<uint8_t*>(&d),
                sizeof(d),
                dst_ip,
                dst_port);
 
-        // update LCD only if struct changed
+        // 3. update LCD only if changed
         if (memcmp(&d, &last, sizeof(BinData)) != 0) {
             lcd.clear();
+            char line0[17];
+            snprintf(line0, sizeof(line0), "%-11sID:%02u", d.name, d.ID);
             lcd.setCursor(0, 0);
-            lcd.print(d.name);
+            lcd.print(line0);
+
+            char line1[17];
+            snprintf(line1, sizeof(line1), "Qty:%u  W:%.1f", d.quantity, d.weight_g);
             lcd.setCursor(0, 1);
-            char line[17];
-            snprintf(line, sizeof(line), "Q:%u W:%u", d.quantity, d.weight);
-            lcd.print(line);
+            lcd.print(line1);
+
             last = d;
         }
+
+        sleep_ms(100);  // 10 Hz loop
     }
 }
 
-//------- Debug Helpers --------
-
-// scan i2c bus and skip one address
-void i2c_scan_except(i2c_inst_t *bus, uint8_t skip_addr) {
-    printf("I2C scan (skip 0x%02X):\n", skip_addr);
-    for (uint8_t addr = 1; addr < 0x7F; ++addr) {
-        if (addr == skip_addr) {
-            continue;
-        }
-        uint8_t dummy;
-        int res = i2c_read_blocking(bus, addr, &dummy, 1, false);
-        if (res >= 0) {
-            printf("  found: 0x%02X\n", addr);
-        }
-    }
-    printf("scan done.\n");
-}
-
-//real-time debugger support (comment out when not using)
+// Helper function, this function allows me to manually trigger the program when I am ready in serial
+// Remove this from main code during actualy deployment, it is only meant for debugging and development use.
 void wait_for_one() {
     printf("Enter 1 to continue...\n");
     int c;

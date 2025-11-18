@@ -8,7 +8,6 @@
 #include "drivers/lcd1602.h"
 #include "drivers/Adafruit_NAU7802.h"
 #include "hardware/i2c.h"
-#include "Adafruit_NAU7802.h"
 #include "adc_service.h"
 
 // UDP payload
@@ -30,29 +29,98 @@ int main() {
     lcd.init();
 
     // optional debug gate
-    //wait_for_one();
+    wait_for_one();
 
+    /* ---------------------------- ADC SHIT ---------------------------- */
     // low-level ADC + high-level service
-    /*NAU7802 nau(i2c1, ADC_SDA, ADC_SCL, 0x2A);
-    ADCService adc(nau);
+    NAU7802 nau(i2c1, ADC_SDA, ADC_SCL, 0x2A);
 
-    if (!adc.init()) {
+    if (!nau.begin()) {
         printf("NAU7802 init failed\n");
         while (true) { sleep_ms(1000); }
-    }*/
+    }
+    printf("NAU7802 Working!\n");
+    //nau.setGain(5);
+    //nau.setRate(3);
 
-    // empty scale
-    //adc.tare();
-    // if you want: put known weight and call adc.calibrate_with_weight(x)
+    /*printf("Calibrating with zero weight\n");
+    int32_t cali = 0;
+    for (int i=0; i<64; i++){
+        cali += nau.read();
+        sleep_ms(10);
+    }
+    cali /= 64;
+    printf("Cali = %ld\n",cali);
 
-    // W5500
+    printf("Calibrating with 6.56g weight, press 1 when ready\n");
+    wait_for_one();
+
+    printf("Taring\n");
+    int32_t cali2 = 0;
+    for (int i=0; i<64; i++){
+        cali2 += nau.read();
+    }
+    cali2 /= 64;
+    printf("reTARED, Tare = %fd\n", cali2);
+
+    int32_t delta_counts = cali2 - cali;
+
+    if (delta_counts == 0) {
+        printf("ERROR: delta_counts = 0 (weight not detected!)\n");
+        while (true) sleep_ms(750);
+    }
+
+    float slope  = 6.56f / (float)delta_counts;
+    float offset = 0.0f;    // offset is handled by raw_zero
+
+    printf("Calibration done: slope=%f  (grams per count)\n", slope);
+
+    wait_for_one();
+    */
+
+    int32_t min_val = INT32_MAX;
+    int32_t max_val = INT32_MIN;
+
+    nau.setGain(0);      // gain = 128 (max)
+    nau.setLDO(2);       // set LDO to 3.0V
+    nau.setRate(2);      // 40 SPS
+
+    sleep_ms(100);
+
+    nau.calibrate(0);
+    sleep_ms(100);
+
+    printf("Stabilizing...\n");
+
+// throw away first 10 samples
+    for (int i = 0; i < 10; i++) {
+        while (!nau.available()) {}
+        nau.read();
+    }
+
+    printf("Measuring noise...\n");
+
+    for (int i = 0; i < 500; i++) {
+        while (!nau.available()) {}
+        int32_t r = nau.read();
+
+        if (r < min_val) min_val = r;
+        if (r > max_val) max_val = r;
+
+        //printf("%ld\n", r);   // optional
+    }
+
+    printf("Noise range: %ld counts (min=%ld max=%ld)\n", max_val - min_val, min_val, max_val);
+    wait_for_one();
+
+    /* ---------------------------- W5500 ---------------------------- */
     if (!w5500_init()) {
-        while (true) { sleep_ms(500); }
+        while (true) { sleep_ms(250); }
     }
 
     const uint8_t sock = 0;
     if (socket(sock, Sn_MR_UDP, 5001, 0) != sock) {
-        while (true) { sleep_ms(500); }
+        while (true) { sleep_ms(250); }
     }
 
     uint8_t  dst_ip[4] = {192, 168, 10, 1};
@@ -83,10 +151,12 @@ int main() {
 
     while (true) {
         // 1. get latest weight in grams (internally averages, tares, etc.)
-        float grams = 1000;
-        d.weight_g  = grams;
+        int32_t raw = nau.read();
+        //int32_t net = raw - cali;
+        //d.weight_g = net * slope;
 
-        printf("grams=%.2f\n", grams);
+        //printf("raw=%d  net=%d  grams=%.2f\n", raw, net, d.weight_g);
+        printf("raw = %d\n", raw);
 
         // 2. send over UDP
         sendto(sock,
