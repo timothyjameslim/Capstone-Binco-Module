@@ -1,345 +1,293 @@
 /**************************************************************************/
 /*!
   @file     Adafruit_NAU7802.cpp
-  @brief    Minimal NAU7802 24-bit ADC driver for Raspberry Pi Pico (Pico SDK)
-            Pico-SDK rewrite of the Adafruit NAU7802 driver style.
-            Uses hardware/i2c.h and board pin mappings from pinouts.h.
+
+  @mainpage NAU7802 I2C 24-bit ADC Driver (Pico SDK)
+
+  @section intro Introduction
+
+  This driver is a **Pico SDK–based rewrite** of the original
+  Adafruit NAU7802 I2C 24-bit ADC library, adapted for use in
+  **non-Arduino environments** (e.g. CLion + RP2040 Pico SDK).
+
+  The original Arduino implementation targets the Adafruit NAU7802
+  breakout board:
+  https://www.adafruit.com/products/4538
+
+  This revision removes Arduino and Adafruit BusIO dependencies and
+  implements direct I²C access using `hardware/i2c.h`. GPIO and I²C
+  pin configuration are intentionally handled by the application
+  layer to keep the driver hardware-agnostic.
+
+  @section authors Authors
+
+  Original Author:
+  Limor Fried (Adafruit Industries)
+
+  Pico SDK Rewrite & Maintenance:
+  Timothy James Lim
+
+  @section license License
+
+  BSD License (see license.txt)
+
+  @section notes Notes
+
+  This file is a **modified derivative work** of the original Adafruit
+  NAU7802 Arduino library. Functionality and register behavior are
+  preserved where possible, while the implementation has been
+  refactored for deterministic timing and compatibility with
+  RP2040-based systems.
+
 */
 /**************************************************************************/
 
 #include "Adafruit_NAU7802.h"
 #include "hardware/i2c.h"
-#include "../pinouts.h"
+
+/*!
+    @brief  Instantiates a new NAU7802 class
+*/
+/**************************************************************************/
+Adafruit_NAU7802::Adafruit_NAU7802() {}
 
 /**************************************************************************/
 /*!
-    @brief  NAU7802 register map (subset)
+    @brief  Sets up the I2C connection and tests that the sensor was found.
+    @param i2c_instance Pointer to RP2040 I2C peripheral (i2c0 / i2c1)
+    @return true if sensor was found, otherwise false.
 */
 /**************************************************************************/
-static constexpr uint8_t REG_PU_CTRL     = 0x00;  ///< Power-up / status
-static constexpr uint8_t REG_CTRL1       = 0x01;  ///< Gain, LDO
-static constexpr uint8_t REG_CTRL2       = 0x02;  ///< Sample rate, cal
-static constexpr uint8_t REG_ADCO_B2     = 0x12;  ///< ADC output MSB (3 bytes total)
-static constexpr uint8_t REG_ADC         = 0x15;  ///< ADC / chopper control
-static constexpr uint8_t REG_PGA         = 0x1B;  ///< PGA control
-static constexpr uint8_t REG_POWER       = 0x1C;  ///< Power control
-static constexpr uint8_t REG_REVISION_ID = 0x1F;  ///< Revision, low nibble = 0xF
+bool Adafruit_NAU7802::begin(i2c_inst_t *i2c_instance) {
+    i2c = i2c_instance;
 
-/**************************************************************************/
-/*!
-    @brief  Construct a new NAU7802 driver object
-    @param  bus  Pico I2C instance (i2c0 or i2c1)
-    @param  sda  GPIO number for SDA
-    @param  scl  GPIO number for SCL
-    @param  addr 7-bit I2C address, default 0x2A
-*/
-/**************************************************************************/
-NAU7802::NAU7802(i2c_inst_t *bus, uint sda, uint scl, uint8_t addr)
-        : bus_(bus), sda_(sda), scl_(scl), addr_(addr) {}
+    uint8_t rev;
+    if (!readReg(NAU7802_REVISION_ID, rev)) return false;
+    if ((rev & 0x0F) != 0x0F) return false;
 
-/**************************************************************************/
-/*!
-    @brief  Low-level helper to write 1 byte to a register
-    @param  reg Register address
-    @param  val Value to write
-    @return true on success, false on I2C error
-*/
-/**************************************************************************/
-bool NAU7802::writeReg(uint8_t reg, uint8_t val) {
-    uint8_t buf[2] = {reg, val};
-    int res = i2c_write_blocking(bus_, addr_, buf, 2, false);
-    return (res == 2);
-}
+    if (!reset()) return false;
+    if (!enable(true)) return false;
 
-/**************************************************************************/
-/*!
-    @brief  Low-level helper to read 1 byte from a register
-    @param  reg Register address
-    @param  val Reference to store read value
-    @return true on success, false on I2C error
-*/
-/**************************************************************************/
-bool NAU7802::readReg(uint8_t reg, uint8_t &val) {
-    // write register address, keep bus
-    if (i2c_write_blocking(bus_, addr_, &reg, 1, true) < 0) {
-        return false;
-    }
-    // read single byte, release bus
-    if (i2c_read_blocking(bus_, addr_, &val, 1, false) < 0) {
-        return false;
-    }
+    if (!setLDO(NAU7802_3V0)) return false;
+    if (!setGain(NAU7802_GAIN_128)) return false;
+    if (!setRate(NAU7802_RATE_10SPS)) return false;
+
+
+    if (!writeMasked(NAU7802_ADC, 0b11 << 4, 0b11 << 4)) return false;   // Disable chopper
+    if (!writeMasked(NAU7802_PGA, 0 << 6, 1 << 6)) return false;        // Low ESR caps
+
     return true;
 }
 
 /**************************************************************************/
 /*!
-    @brief  Perform the NAU7802 reset sequence (RR bit)
-    @return true if device reports ready, false otherwise
+    @brief  Whether to have the sensor enabled and working or in power down mode
+    @param  flag True to be in powered mode, False for power down mode
+    @return False if something went wrong with I2C comms
 */
 /**************************************************************************/
-bool NAU7802::reset() {
-    uint8_t pu = 0;
-
-    // read current PU_CTRL
-    if (!readReg(REG_PU_CTRL, pu)) {
-        return false;
-    }
-    // set RR (bit0) to reset all registers
-    if (!writeReg(REG_PU_CTRL, pu | 0x01)) {
-        return false;
-    }
-    sleep_ms(10);
-
-    // clear RR, set PUD (bit1) to bring up digital
-    if (!writeReg(REG_PU_CTRL, 0x02)) {
-        return false;
-    }
-    sleep_ms(1);
-
-    // read back to check PU_READY (bit3)
-    if (!readReg(REG_PU_CTRL, pu)) {
-        return false;
-    }
-    return (pu & 0x08) != 0;
-}
-
-/**************************************************************************/
-/*!
-    @brief  Power up or power down the NAU7802
-    @param  on true to enable analog+digital, false to power down
-    @return true on success
-*/
-/**************************************************************************/
-bool NAU7802::enable(bool on) {
-    uint8_t pu = 0;
-    if (!readReg(REG_PU_CTRL, pu)) {
-        return false;
+bool Adafruit_NAU7802::enable(bool flag) {
+    if (!flag) {
+        writeMasked(NAU7802_PU_CTRL, 0, (1 << 2) | (1 << 1));
+        return true;
     }
 
-    if (!on) {
-        // clear analog (bit2) and digital (bit1)
-        pu &= ~(1 << 2);
-        pu &= ~(1 << 1);
-        return writeReg(REG_PU_CTRL, pu);
-    }
-
-    // turn on digital and analog
-    pu |= (1 << 1); // PUD
-    pu |= (1 << 2); // PUA
-    if (!writeReg(REG_PU_CTRL, pu)) {
-        return false;
-    }
-
-    // wait for analog to settle
+    writeMasked(NAU7802_PU_CTRL, (1 << 1) | (1 << 2),
+                (1 << 1) | (1 << 2));
     sleep_ms(600);
+    writeMasked(NAU7802_PU_CTRL, 1 << 4, 1 << 4);
 
-    // set PU_START (bit4)
-    pu |= (1 << 4);
-    if (!writeReg(REG_PU_CTRL, pu)) {
-        return false;
-    }
-
-    // confirm PU_READY (bit3)
-    if (!readReg(REG_PU_CTRL, pu)) {
-        return false;
-    }
-    return (pu & (1 << 3)) != 0;
+    uint8_t reg;
+    readReg(NAU7802_PU_CTRL, reg);
+    return reg & (1 << 3);
 }
 
 /**************************************************************************/
 /*!
-    @brief  Initialize I2C pins (from pinouts.h) and configure the NAU7802
-    @return true if device is detected and configured, false otherwise
+    @brief Whether there is new ADC data to read
+    @return True when there's new data available
 */
 /**************************************************************************/
-bool NAU7802::begin() {
-    // init I2C on board-defined ADC pins
-    i2c_init(bus_, 400000);
-    gpio_set_function(ADC_SDA, GPIO_FUNC_I2C);
-    gpio_set_function(ADC_SCL, GPIO_FUNC_I2C);
-    gpio_pull_up(ADC_SDA);
-    gpio_pull_up(ADC_SCL);
-
-    // reset and enable
-    if (!reset()) {
-        return false;
-    }
-    if (!enable(true)) {
-        return false;
-    }
-
-    // check revision ID, low nibble should be 0xF
-    uint8_t rev = 0;
-    if (!readReg(REG_REVISION_ID, rev)) {
-        return false;
-    }
-    if ((rev & 0x0F) != 0x0F) {
-        return false;
-    }
-
-    // set LDO to 3.0V and gain to 128
-    uint8_t ctrl1 = 0;
-    if (!readReg(REG_CTRL1, ctrl1)) {
-        return false;
-    }
-
-    // LDO bits [5:3] = 0b101 (3.0V)
-    ctrl1 &= ~(0x07 << 3);
-    ctrl1 |= (0x05 << 3);
-
-    // gain bits [2:0] = 0b111 (128)
-    ctrl1 &= ~0x07;
-    ctrl1 |= 0x07;
-
-    if (!writeReg(REG_CTRL1, ctrl1)) {
-        return false;
-    }
-
-    // sample rate to 10SPS: CTRL2 bits [6:4] = 0
-    uint8_t ctrl2 = 0;
-    if (!readReg(REG_CTRL2, ctrl2)) {
-        return false;
-    }
-    ctrl2 &= ~(0x07 << 4);
-    if (!writeReg(REG_CTRL2, ctrl2)) {
-        return false;
-    }
-
-    return true;
+bool Adafruit_NAU7802::available() {
+    uint8_t reg;
+    readReg(NAU7802_PU_CTRL, reg);
+    return reg & (1 << 5);
 }
 
 /**************************************************************************/
 /*!
-    @brief  Check whether the ADC has a fresh conversion ready
-    @return true if ready (PU_CTRL bit5 = 1), false if not ready or I2C error
+    @brief  Set which channel for ADC
+    @param channel Set to 0 for CH1, 1 for CH2
+    @returns False if any I2C error occured
 */
 /**************************************************************************/
-bool NAU7802::available() {
-    uint8_t pu = 0;
-    if (!readReg(REG_PU_CTRL, pu)) {
-        return false;
-    }
-    // CR bit = bit5
-    return (pu & (1 << 5)) != 0;
+bool Adafruit_NAU7802::setChannel(uint8_t channel) {
+    if (channel > 1) channel = 1;
+    return writeMasked(NAU7802_CTRL2, channel << 7, 1 << 7);
 }
 
 /**************************************************************************/
 /*!
-    @brief  Read the 24-bit conversion result from the ADC
-    @note   This function blocks until data is ready.
-    @return Signed 32-bit value (24-bit sign-extended)
+    @brief Read the stored 24-bit ADC output value.
+    @return Signed integer with ADC output result, extended to a int32_t
 */
 /**************************************************************************/
-int32_t NAU7802::read() {
-    // wait for data ready
-    while (!available()) {
-        sleep_ms(1);
-    }
 
-    // request 3 data bytes starting at ADCO_B2
-    uint8_t start_reg = REG_ADCO_B2;
-    uint8_t data[3] = {0, 0, 0};
+int32_t Adafruit_NAU7802::read() {
+    uint8_t reg = NAU7802_ADCO_B2;
+    uint8_t buf[3];
 
-    // write register pointer, keep bus
-    i2c_write_blocking(bus_, addr_, &start_reg, 1, true);
-    // read 3 bytes, release bus
-    i2c_read_blocking(bus_, addr_, data, 3, false);
+    i2c_write_blocking(i2c, NAU7802_I2CADDR_DEFAULT, &reg, 1, true);
+    i2c_read_blocking(i2c, NAU7802_I2CADDR_DEFAULT, buf, 3, false);
 
-    // combine into 24-bit
-    int32_t val = (static_cast<int32_t>(data[0]) << 16) |
-                  (static_cast<int32_t>(data[1]) << 8)  |
-                  (static_cast<int32_t>(data[2]) << 0);
-
-    // sign-extend from 24 to 32 bits
-    if (val & 0x800000) {
-        val |= 0xFF000000;
-    }
-
+    int32_t val = (buf[0] << 16) | (buf[1] << 8) | buf[2];
+    if (val & 0x800000) val |= 0xFF000000;
     return val;
 }
 
 /**************************************************************************/
 /*!
-    @brief  Run one of the internal calibration modes
-    @param  mode 0 = internal, 2 = offset, 3 = gain (see datasheet)
-    @return true on success, false on I2C error or cal error
+    @brief Perform a soft reset
+    @return False if there was any I2C comms error
 */
 /**************************************************************************/
-bool NAU7802::calibrate(uint8_t mode) {
-    uint8_t ctrl2 = 0;
-    if (!readReg(REG_CTRL2, ctrl2)) {
-        return false;
-    }
+bool Adafruit_NAU7802::reset() {
+    writeMasked(NAU7802_PU_CTRL, 1 << 0, 1 << 0);
+    sleep_ms(10);
+    writeMasked(NAU7802_PU_CTRL, 0 << 0, 1 << 0);
+    writeMasked(NAU7802_PU_CTRL, 1 << 1, 1 << 1);
+    sleep_ms(1);
 
-    // set CALMOD bits [1:0]
-    ctrl2 &= ~0x03;
-    ctrl2 |= (mode & 0x03);
+    uint8_t ready;
+    readReg(NAU7802_PU_CTRL, ready);
+    return ready & (1 << 3);
+}
 
-    // set CAL_START bit2
-    ctrl2 |= (1 << 2);
-    if (!writeReg(REG_CTRL2, ctrl2)) {
-        return false;
-    }
+/**************************************************************************/
+/*!
+    @brief  The desired LDO voltage setter
+    @param voltage The LDO setting: NAU7802_4V5, NAU7802_4V2, NAU7802_3V9,
+    NAU7802_3V6, NAU7802_3V3, NAU7802_3V0, NAU7802_2V7, NAU7802_2V4, or
+    NAU7802_EXTERNAL if we are not using the internal LDO
+    @return False if there was any I2C comms error
+*/
+/**************************************************************************/
+bool Adafruit_NAU7802::setLDO(NAU7802_LDOVoltage voltage) {
+    if (voltage == NAU7802_EXTERNAL)
+        return writeMasked(NAU7802_PU_CTRL, 0, 1 << 7);
 
-    // wait for CAL_START to clear
-    do {
+    writeMasked(NAU7802_PU_CTRL, 1 << 7, 1 << 7);
+    return writeMasked(NAU7802_CTRL1, voltage << 3, 0b111 << 3);
+}
+
+/**************************************************************************/
+/*!
+    @brief  The desired LDO voltage getter
+    @returns The voltage setting: NAU7802_4V5, NAU7802_4V2, NAU7802_3V9,
+    NAU7802_3V6, NAU7802_3V3, NAU7802_3V0, NAU7802_2V7, NAU7802_2V4, or
+    NAU7802_EXTERNAL if we are not using the internal LDO
+*/
+/**************************************************************************/
+NAU7802_LDOVoltage Adafruit_NAU7802::getLDO() {
+    uint8_t pu, ctrl1;
+    readReg(NAU7802_PU_CTRL, pu);
+    if (!(pu & (1 << 7))) return NAU7802_EXTERNAL;
+    readReg(NAU7802_CTRL1, ctrl1);
+    return (NAU7802_LDOVoltage)((ctrl1 >> 3) & 0x07);
+}
+
+/**************************************************************************/
+/*!
+    @brief  The desired ADC gain setter
+    @param  gain Desired gain: NAU7802_GAIN_1, NAU7802_GAIN_2, NAU7802_GAIN_4,
+    NAU7802_GAIN_8, NAU7802_GAIN_16, NAU7802_GAIN_32, NAU7802_GAIN_64,
+    or NAU7802_GAIN_128
+    @returns False if there was any error during I2C comms
+*/
+/**************************************************************************/
+bool Adafruit_NAU7802::setGain(NAU7802_Gain gain) {
+    return writeMasked(NAU7802_CTRL1, gain, 0b111);
+}
+
+/**************************************************************************/
+/*!
+    @brief  The desired ADC gain getter
+    @returns The gain: NAU7802_GAIN_1, NAU7802_GAIN_2, NAU7802_GAIN_4,
+    NAU7802_GAIN_8, NAU7802_GAIN_16, NAU7802_GAIN_32, NAU7802_GAIN_64,
+    or NAU7802_GAIN_128
+*/
+/**************************************************************************/
+NAU7802_Gain Adafruit_NAU7802::getGain() {
+    uint8_t reg;
+    readReg(NAU7802_CTRL1, reg);
+    return (NAU7802_Gain)(reg & 0b111);
+}
+
+/**************************************************************************/
+/*!
+    @brief  The desired conversion rate setter
+    @param rate The desired rate: NAU7802_RATE_10SPS, NAU7802_RATE_20SPS,
+    NAU7802_RATE_40SPS, NAU7802_RATE_80SPS, or NAU7802_RATE_320SPS
+    @returns False if any I2C error occured
+*/
+/**************************************************************************/
+bool Adafruit_NAU7802::setRate(NAU7802_SampleRate rate) {
+    return writeMasked(NAU7802_CTRL2, rate << 4, 0b111 << 4);
+}
+
+/**************************************************************************/
+/*!
+    @brief  The desired conversion rate getter
+    @returns The rate: NAU7802_RATE_10SPS, NAU7802_RATE_20SPS,
+    NAU7802_RATE_40SPS, NAU7802_RATE_80SPS, or NAU7802_RATE_320SPS
+*/
+/**************************************************************************/
+NAU7802_SampleRate Adafruit_NAU7802::getRate() {
+    uint8_t reg;
+    readReg(NAU7802_CTRL2, reg);
+    return (NAU7802_SampleRate)((reg >> 4) & 0b111);
+}
+
+/**************************************************************************/
+/*!
+    @brief  Enable or disable optional PGA filters. NOTE - this should only
+    be used for single channel operation.
+    @param enable Use true to enable or false to disable.
+    @returns False if any I2C error occured
+*/
+/**************************************************************************/
+bool Adafruit_NAU7802::setPGACap(bool enable) {
+    return writeMasked(NAU7802_POWER, enable << 7, 1 << 7);
+}
+
+/**************************************************************************/
+/*!
+    @brief Enable or disable optional PGA bypass.
+    @param enable Use true to enable or false to disable
+    @return False if any I2C error occurred
+*/
+/**************************************************************************/
+bool Adafruit_NAU7802::setPGABypass(bool enable) {
+    return writeMasked(NAU7802_PGA, enable << 4, 1 << 4);
+}
+
+/**************************************************************************/
+/*!
+    @brief  Perform the internal calibration procedure
+    @param mode The calibration mode to perform: NAU7802_CALMOD_INTERNAL,
+    NAU7802_CALMOD_OFFSET or NAU7802_CALMOD_GAIN
+    @returns True on calibrations success
+*/
+/**************************************************************************/
+bool Adafruit_NAU7802::calibrate(NAU7802_Calibration mode) {
+    writeMasked(NAU7802_CTRL2, mode, 0b11);
+    writeMasked(NAU7802_CTRL2, 1 << 2, 1 << 2);
+
+    while (true) {
+        uint8_t reg;
+        readReg(NAU7802_CTRL2, reg);
+        if (!(reg & (1 << 2)))
+            return !(reg & (1 << 3));
         sleep_ms(10);
-        if (!readReg(REG_CTRL2, ctrl2)) {
-            return false;
-        }
-    } while (ctrl2 & (1 << 2));
-
-    // check CAL_ERR bit3
-    return (ctrl2 & (1 << 3)) == 0;
-}
-
-/**************************************************************************/
-/*!
-    @brief  Set the ADC sample rate
-    @param  rate 3-bit value placed in CTRL2[6:4]
-    @return true on success
-*/
-/**************************************************************************/
-bool NAU7802::setRate(uint8_t rate) {
-    uint8_t ctrl2 = 0;
-    if (!readReg(REG_CTRL2, ctrl2)) {
-        return false;
     }
-    ctrl2 &= ~(0x07 << 4);
-    ctrl2 |= ((rate & 0x07) << 4);
-    return writeReg(REG_CTRL2, ctrl2);
-}
-
-/**************************************************************************/
-/*!
-    @brief  Set the ADC gain
-    @param  gain 3-bit value placed in CTRL1[2:0]
-    @return true on success
-*/
-/**************************************************************************/
-bool NAU7802::setGain(uint8_t gain) {
-    uint8_t ctrl1 = 0;
-    if (!readReg(REG_CTRL1, ctrl1)) {
-        return false;
-    }
-    ctrl1 &= ~0x07;
-    ctrl1 |= (gain & 0x07);
-    return writeReg(REG_CTRL1, ctrl1);
-}
-
-/**************************************************************************/
-/*!
-    @brief  Set the internal LDO voltage
-    @param  ldo 3-bit value placed in CTRL1[5:3]
-    @return true on success
-*/
-/**************************************************************************/
-bool NAU7802::setLDO(uint8_t ldo) {
-    uint8_t ctrl1 = 0;
-    if (!readReg(REG_CTRL1, ctrl1)) {
-        return false;
-    }
-    ctrl1 &= ~(0x07 << 3);
-    ctrl1 |= ((ldo & 0x07) << 3);
-    return writeReg(REG_CTRL1, ctrl1);
 }
