@@ -1,47 +1,62 @@
-//
-// Created by Timothy James Lim on 9/11/25.
-//
-
 #ifndef BINCO_ADC_SERVICE_H
 #define BINCO_ADC_SERVICE_H
 
 #include "pico/stdlib.h"
-
-// forward-declare your driver
-class NAU7802;
+#include "Adafruit_NAU7802.h"
 
 /**
- * High-level ADC wrapper for loadcell.
- * Handles init, tare, calibration, and per-loop reading.
+ * High-level ADC service for NAU7802 + load cell.
+ *
+ * Pipeline:
+ *   raw ADC counts
+ *     → IIR filter (counts domain)
+ *     → tare subtraction (reference mass)
+ *     → scale conversion
+ *     → grams
  */
 class ADCService {
 public:
-    // create with reference to an already-constructed NAU7802
-    ADCService(NAU7802 &adc);
+    explicit ADCService(Adafruit_NAU7802 &adc);
 
-    // 1. single init
-    bool init();
+    // Initialize ADC + internal NAU7802 calibration
+    bool init(i2c_inst_t *i2c);
 
-    // 3. calibration + tare
-    // call once with empty scale -> stores baseline
-    void tare();
+    // Enable IIR low-pass filter (must be called BEFORE tare)
+    // cutoff_hz  : filter cutoff frequency
+    // sample_hz  : ADC sample rate (e.g. 10 for 10 SPS)
+    void enable_iir(float cutoff_hz, float sample_hz);
 
-    // call after placing a known weight (grams) on the scale.
-    // this sets counts_per_gram.
+    // Tare using a known reference mass already on the scale (e.g. 6.56 g)
+    void tare(float reference_grams);
+
+    // Optional second-point calibration using a heavier known mass
     void calibrate_with_weight(float known_grams);
 
-    // 2. single function for while-loop
-    // reads ADC, averages, applies tare + calibration, returns grams
+    // Read weight in grams (blocking, filtered, calibrated)
     float read_grams();
 
 private:
-    NAU7802 &adc_;
-    int32_t  tare_offset_      = 0;
-    float    counts_per_gram_  = 1.0f;  // avoid div by zero
-    bool     has_tare_         = false;
-    bool     has_cal_          = false;
+    // --- low-level ---
+    Adafruit_NAU7802 &adc_;
 
-    int32_t read_avg_(int samples);
+    // --- IIR filter state ---
+    struct {
+        float y     = 0.0f;
+        float alpha = 0.0f;
+        bool  en    = false;
+    } iir_;
+
+    // --- calibration state ---
+    int32_t tare_offset_counts_ = 0;   // filtered counts @ reference mass
+    float   tare_ref_grams_     = 0.0f;
+
+    float   counts_per_gram_    = 1.0f;
+
+    bool    has_tare_           = false;
+    bool    has_cal_            = false;
+
+    // --- helpers ---
+    int32_t read_filtered_counts_(int samples);
 };
 
-#endif //BINCO_ADC_SERVICE_H
+#endif // BINCO_ADC_SERVICE_H

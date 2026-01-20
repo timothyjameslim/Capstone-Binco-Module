@@ -27,10 +27,6 @@
   Pico SDK Rewrite & Maintenance:
   Timothy James Lim
 
-  @section license License
-
-  BSD License (see license.txt)
-
   @section notes Notes
 
   This file is a **modified derivative work** of the original Adafruit
@@ -38,6 +34,9 @@
   preserved where possible, while the implementation has been
   refactored for deterministic timing and compatibility with
   RP2040-based systems.
+
+  Original Github:
+  https://github.com/adafruit/Adafruit_NAU7802
 
 */
 /**************************************************************************/
@@ -61,12 +60,12 @@ Adafruit_NAU7802::Adafruit_NAU7802() {}
 bool Adafruit_NAU7802::begin(i2c_inst_t *i2c_instance) {
     i2c = i2c_instance;
 
+    if (!reset()) return false;
+    if (!enable(true)) return false;
+
     uint8_t rev;
     if (!readReg(NAU7802_REVISION_ID, rev)) return false;
     if ((rev & 0x0F) != 0x0F) return false;
-
-    if (!reset()) return false;
-    if (!enable(true)) return false;
 
     if (!setLDO(NAU7802_3V0)) return false;
     if (!setGain(NAU7802_GAIN_128)) return false;
@@ -290,4 +289,49 @@ bool Adafruit_NAU7802::calibrate(NAU7802_Calibration mode) {
             return !(reg & (1 << 3));
         sleep_ms(10);
     }
+}
+
+bool Adafruit_NAU7802::writeReg(uint8_t reg, uint8_t value) {
+    uint8_t buf[2] = { reg, value };
+    return i2c_write_blocking(
+            i2c,
+            NAU7802_I2CADDR_DEFAULT,
+            buf,
+            2,
+            false
+    ) == 2;
+}
+
+bool Adafruit_NAU7802::readReg(uint8_t reg, uint8_t &value) {
+    if (i2c_write_blocking(
+            i2c,
+            NAU7802_I2CADDR_DEFAULT,
+            &reg,
+            1,
+            true
+    ) != 1) {
+        return false;
+    }
+
+    return i2c_read_blocking(
+            i2c,
+            NAU7802_I2CADDR_DEFAULT,
+            &value,
+            1,
+            false
+    ) == 1;
+}
+
+bool Adafruit_NAU7802::writeMasked(uint8_t reg,
+                                   uint8_t value,
+                                   uint8_t mask) {
+    uint8_t current;
+    if (!readReg(reg, current)) {
+        return false;
+    }
+
+    current &= ~mask;
+    current |= (value & mask);
+
+    return writeReg(reg, current);
 }

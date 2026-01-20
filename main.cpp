@@ -1,6 +1,8 @@
 #include "pico/stdlib.h"
 #include <cstring>
 #include <cstdio>
+#include <cmath>
+
 #include "pinouts.h"
 #include "drivers/w5500.h"
 #include "drivers/w5500_net.h"
@@ -8,7 +10,6 @@
 #include "drivers/lcd1602.h"
 #include "drivers/Adafruit_NAU7802.h"
 #include "hardware/i2c.h"
-#include <cmath>
 
 // UDP payload
 struct __attribute__((packed)) BinData {
@@ -21,19 +22,13 @@ struct __attribute__((packed)) BinData {
 // debug helpers
 void wait_for_one(void);
 
-//helper functions
-float filter_IIR(float x);
-float sma20(float x);
+// helper functions
+static void init_i2c_adc();
 
-//global variable
-#define SMA_MOVING 50
-float sma_buf[SMA_MOVING] = {0};
-int sma_index = 0;
-int sma_count = 0;
-
+// ======================= MAIN =======================
 int main() {
     stdio_init_all();
-    sleep_ms(500);
+    sleep_ms(1500);
 
     LCD1602 lcd;
     lcd.init();
@@ -42,90 +37,66 @@ int main() {
     wait_for_one();
 
     /* ---------------------------- ADC SHIT ---------------------------- */
-    // low-level ADC + high-level service
-    NAU7802 nau(i2c1, ADC_SDA, ADC_SCL, 0x2A);
-    float zero_offset = 0.0f;
-    float scale = 1.0f;
+    // low-level ADC only (no service abstraction)
 
-    if (!nau.begin()) {
+    init_i2c_adc();
+
+    Adafruit_NAU7802 adc;
+
+    if (!adc.begin(i2c1)) {
         printf("NAU7802 init failed\n");
         while (true) { sleep_ms(1000); }
     }
-    printf("NAU7802 Working!\n");
 
-    int32_t min_val = INT32_MAX;
-    int32_t max_val = INT32_MIN;
+    adc.calibrate(NAU7802_CALMOD_INTERNAL);
+    printf("NAU7802 ready\n");
 
-    //nau.setGain(0);      // gain = 128 (max)
-    //nau.setLDO(2);       // set LDO to 3.0V
-    //nau.setRate(2);      // 40 SPS
-
-    nau.calibrate(0);
-
-    printf("Stabilizing...\n");
-
-// throw away first 10 samples
-    for (int i = 0; i < 50; i++) {
-        while (!nau.available()) {}
-        nau.read();
-    }
-    //printf("Measuring noise...\n");
-
-    for (int i = 0; i < 500; i++) {
-        while (!nau.available()) {}
-        int32_t r = nau.read();
-        float filtered = filter_IIR((float)r);
-        //printf("raw=%ld filtered=%.2f\n", r, filtered);
-
-        if (filtered < min_val) min_val = filtered;
-        if (filtered > max_val) max_val = filtered;
-
-        //printf("%ld\n", r);   // optional
+    // discard early unstable samples
+    for (int i = 0; i < 20; i++) {
+        while (!adc.available()) {}
+        adc.read();
     }
 
-    printf("Noise range: %ld counts (min=%ld max=%ld)\n", max_val - min_val, min_val, max_val);
-
-    //wait_for_one();
-
-    printf("Taring...\n");
-
-    zero_offset = 0;
-    for (int i = 0; i < 200; i++) {
-        int32_t raw = nau.read();
-        float f = filter_IIR((float)raw);
-        zero_offset += f;
-        sleep_ms(5);
-    }
-    zero_offset /= 200.0f;
-
-    printf("zero_offset = %.2f\n", zero_offset);
-    printf("Place 6.56g weight...\n");
+    /* ======================= TARE ======================= */
+    printf("Ensure NOTHING is on the scale.\n");
+    printf("Press 1 to tare...\n");
     wait_for_one();
 
-    float cal_val = 0.0f;
-    bool cal = false;
-    while(!cal){
-        for (int i = 0; i < 200; i++) {
-            int32_t raw = nau.read();
-            float f = filter_IIR((float)raw);
-            cal_val += f;
-            sleep_ms(5);
-        }
-        cal_val /= 200.0f;
+    const int TARE_SAMPLES = 64;
+    int64_t tare_sum = 0;
 
-        if (scale > 0.0f) {
-            cal = true;   // good calibration → exit loop
-        } else {
-            printf("Bad calibration (scale negative). Retrying...\n");
-            sleep_ms(300);
-        }
+    for (int i = 0; i < TARE_SAMPLES; i++) {
+        while (!adc.available()) {}
+        tare_sum += adc.read();
     }
 
-    float delta = cal_val - zero_offset;
-    scale = 6.56f / delta;   // grams per ADC count
+    int32_t tare_offset = tare_sum / TARE_SAMPLES;
+    printf("Tare offset = %ld counts\n", tare_offset);
 
-    printf("Calibration OK: scale = %f grams per count\n", scale);
-    //wait_for_one();
+    /* ======================= CALIBRATION ======================= */
+    const float REF_WEIGHT = 6.56f;
+
+    printf("Place %.2fg weight on scale.\n", REF_WEIGHT);
+    printf("Press 1 to calibrate...\n");
+    wait_for_one();
+
+    int64_t cal_sum = 0;
+    for (int i = 0; i < TARE_SAMPLES; i++) {
+        while (!adc.available()) {}
+        cal_sum += adc.read();
+    }
+
+    int32_t cal_avg = cal_sum / TARE_SAMPLES;
+    int32_t delta = cal_avg - tare_offset;
+
+    if (delta <= 0) {
+        printf("Calibration failed! delta=%ld\n", delta);
+        while (true) {}
+    }
+
+    float grams_per_count = REF_WEIGHT / (float)delta;
+    printf("Calibration OK\n");
+    printf("grams_per_count = %.8f g/count\n", grams_per_count);
 
     /* ---------------------------- W5500 ---------------------------- */
     if (!w5500_init()) {
@@ -158,56 +129,47 @@ int main() {
         lcd.print(line0);
 
         char line1[17];
-        snprintf(line1, sizeof(line1), "Qty:%u  W:%.1f", d.quantity, d.weight_g);
+        snprintf(line1, sizeof(line1), "Qty:%u  W:%.1f",
+                 d.quantity, d.weight_g);
         lcd.setCursor(0, 1);
         lcd.print(line1);
     }
 
-    //----uhh weight stuff---
-    const float COIN_WEIGHT = 6.56f;
-    const float TOL = 0.05f;
-
-    float lower = COIN_WEIGHT * (1.0f - TOL);
-    float upper = COIN_WEIGHT * (1.0f + TOL);
-
+    /* ======================= RUNTIME ======================= */
     while (true) {
-        // 1. get latest weight in grams (internally averages, tares, etc.)
-        int32_t raw = nau.read();
-        //IIR Smoothing
-        float filtered = filter_IIR((float)raw);
-        float net_counts = filtered - zero_offset;
+        while (!adc.available()) {
+            tight_loop_contents();
+        }
 
-        //SMA20 for stability
-        float smooth_counts = sma20(net_counts);
+        int32_t raw = adc.read();
+        float grams = (raw - tare_offset) * grams_per_count;
 
-        // Apply calibration
-        float grams = smooth_counts * scale;
-
-        // Estimate item count before rounding
-        float approx_count = grams / 6.56f;
+        // clamp tiny noise only
+        if (grams < 0.0f) grams = 0.0f;
 
         d.weight_g = grams;
-        d.quantity = approx_count;
 
-        printf("grams=%.3f\n", d.weight_g);
+        printf("raw grams = %.3f\n", grams);
 
-        // 2. send over UDP
+        // send over UDP
         sendto(sock,
                reinterpret_cast<uint8_t*>(&d),
                sizeof(d),
                dst_ip,
                dst_port);
 
-        // 3. update LCD only if changed
+        // update LCD only if changed
         if (memcmp(&d, &last, sizeof(BinData)) != 0) {
             lcd.clear();
+
             char line0[17];
             snprintf(line0, sizeof(line0), "%-11sID:%02u", d.name, d.ID);
             lcd.setCursor(0, 0);
             lcd.print(line0);
 
             char line1[17];
-            snprintf(line1, sizeof(line1), "Qty:%u  W:%.1f", d.quantity, d.weight_g);
+            snprintf(line1, sizeof(line1), "Qty:%u  W:%.1f",
+                     d.quantity, d.weight_g);
             lcd.setCursor(0, 1);
             lcd.print(line1);
 
@@ -218,8 +180,10 @@ int main() {
     }
 }
 
+/* ======================= HELPERS ======================= */
+
 // Helper function, this function allows me to manually trigger the program when I am ready in serial
-// Remove this from main code during actualy deployment, it is only meant for debugging and development use.
+// Remove this from main code during actual deployment, it is only meant for debugging and development use.
 void wait_for_one() {
     printf("Enter 1 to continue...\n");
     int c;
@@ -229,24 +193,10 @@ void wait_for_one() {
     printf("Continuing...\n");
 }
 
-float filter_IIR(float x) {
-    static float y = 0.0f;  // initial state
-    const float k = 0.05f;  // smoothing factor 0.01 (200 samples) 0.05 (40 samples)
-
-    y = k * x + (1.0f - k) * y;
-    return y;
-}
-
-//moving average sampler 20
-float sma20(float x) {
-    sma_buf[sma_index] = x;
-    sma_index = (sma_index + 1) % SMA_MOVING;
-
-    if (sma_count < SMA_MOVING) sma_count++;
-
-    float sum = 0.0f;
-    for (int i = 0; i < sma_count; i++) {
-        sum += sma_buf[i];
-    }
-    return sum / sma_count;
+static void init_i2c_adc() {
+    i2c_init(i2c1, 400 * 1000);   // 400 kHz recommended for NAU7802
+    gpio_set_function(ADC_SDA, GPIO_FUNC_I2C);
+    gpio_set_function(ADC_SCL, GPIO_FUNC_I2C);
+    gpio_pull_up(ADC_SDA);
+    gpio_pull_up(ADC_SCL);
 }
