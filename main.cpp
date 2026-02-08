@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cmath>
 
+#include "packets.h"
 #include "pinouts.h"
 #include "drivers/w5500.h"
 #include "drivers/w5500_net.h"
@@ -11,56 +12,67 @@
 #include "drivers/Adafruit_NAU7802.h"
 #include "hardware/i2c.h"
 
-// UDP payload
-struct __attribute__((packed)) BinData {
-    char     name[16];
-    uint16_t ID;
-    uint16_t quantity;
-    float    weight_g;      // now send grams directly
-};
-
 // debug helpers
 void wait_for_one(void);
 
 // helper functions
 static void init_i2c_adc();
+static void fill_header(BincoHeader &hdr, MsgType type);
+CommandPacket qt_instruction(uint8_t sock);
 
-// ======================= MAIN =======================
-int main() {
+/* ================= GLOBAL STATE ================= */
+
+static BincoState g_state = STATE_IDLE;
+static uint16_t g_device_id = 1;
+static uint16_t g_sequence = 0;
+
+static int32_t g_tare_offset = 0;
+static float   g_grams_per_count = 1.0f;
+static float   g_manual_offset = 0.0f;
+
+int main()
+{
     stdio_init_all();
     sleep_ms(1500);
 
+    /* LED */
+    gpio_init(T_LED);
+    gpio_set_dir(T_LED, GPIO_OUT);
+
+    /* LCD */
     LCD1602 lcd;
     lcd.init();
+    lcd.clear();
+    lcd.print("Waiting Setup");
 
-    // optional debug gate
-    wait_for_one();
+    /* NETWORK */
+    if (!w5500_init())
+        while(true);
 
-    /* ---------------------------- ADC SHIT ---------------------------- */
-    // low-level ADC only (no service abstraction)
+    const uint8_t sock = 0;
+    socket(sock, Sn_MR_UDP, 5001, 0);
 
+    uint8_t dst_ip[4] = {192,168,10,1};
+    uint16_t dst_port = 5001;
+
+
+    /* ADC */
     init_i2c_adc();
 
     Adafruit_NAU7802 adc;
-
-    if (!adc.begin(i2c1)) {
-        printf("NAU7802 init failed\n");
-        while (true) { sleep_ms(1000); }
-    }
+    if (!adc.begin(i2c1))
+        while(true);
 
     adc.calibrate(NAU7802_CALMOD_INTERNAL);
-    printf("NAU7802 ready\n");
-
-    // discard early unstable samples
-    for (int i = 0; i < 20; i++) {
-        while (!adc.available()) {}
-        adc.read();
-    }
 
     /* ======================= TARE ======================= */
     printf("Ensure NOTHING is on the scale.\n");
-    printf("Press 1 to tare...\n");
-    wait_for_one();
+    printf("Wait for Qt Instruction...\n");
+    CommandPacket cmd;
+    do {
+        cmd = qt_instruction(sock);
+    } while(cmd.command != CMD_TARE);
+    printf("CMD_TARE");
 
     const int TARE_SAMPLES = 64;
     int64_t tare_sum = 0;
@@ -73,12 +85,16 @@ int main() {
     int32_t tare_offset = tare_sum / TARE_SAMPLES;
     printf("Tare offset = %ld counts\n", tare_offset);
 
+
     /* ======================= CALIBRATION ======================= */
-    const float REF_WEIGHT = 6.56f;
+    const float REF_WEIGHT = 5.3f;
 
     printf("Place %.2fg weight on scale.\n", REF_WEIGHT);
-    printf("Press 1 to calibrate...\n");
-    wait_for_one();
+    printf("Wait for Qt Instruction...\n");
+    do {
+        cmd = qt_instruction(sock);
+    } while(cmd.command != CMD_CALI);
+    printf("CMD_CALI");
 
     int64_t cal_sum = 0;
     for (int i = 0; i < TARE_SAMPLES; i++) {
@@ -94,89 +110,120 @@ int main() {
         while (true) {}
     }
 
-    float grams_per_count = REF_WEIGHT / (float)delta;
+    float grams_per_count = REF_WEIGHT / (float) delta;
     printf("Calibration OK\n");
     printf("grams_per_count = %.8f g/count\n", grams_per_count);
 
-    /* ---------------------------- W5500 ---------------------------- */
-    if (!w5500_init()) {
-        while (true) { sleep_ms(250); }
-    }
+    /* ===== LOOP ===== */
 
-    const uint8_t sock = 0;
-    if (socket(sock, Sn_MR_UDP, 5001, 0) != sock) {
-        while (true) { sleep_ms(250); }
-    }
-
-    uint8_t  dst_ip[4] = {192, 168, 10, 1};
-    uint16_t dst_port  = 5001;
-
-    BinData d{};
-    const char nm[] = "Binco1";
-    for (int i = 0; i < 16 && nm[i]; ++i) d.name[i] = nm[i];
-    d.ID       = 1;
-    d.quantity = 1;
-    d.weight_g = 0.0f;
-
-    BinData last = d;
-
-    // initial LCD
+    while(true)
     {
-        char line0[17];
-        snprintf(line0, sizeof(line0), "%-11sID:%02u", d.name, d.ID);
-        lcd.clear();
-        lcd.setCursor(0, 0);
-        lcd.print(line0);
-
-        char line1[17];
-        snprintf(line1, sizeof(line1), "Qty:%u  W:%.1f",
-                 d.quantity, d.weight_g);
-        lcd.setCursor(0, 1);
-        lcd.print(line1);
-    }
-
-    /* ======================= RUNTIME ======================= */
-    while (true) {
-        while (!adc.available()) {
+        /* --- ADC READ --- */
+        while(!adc.available())
             tight_loop_contents();
-        }
 
         int32_t raw = adc.read();
-        float grams = (raw - tare_offset) * grams_per_count;
 
-        // clamp tiny noise only
-        if (grams < 0.0f) grams = 0.0f;
+        float grams =
+                (raw - g_tare_offset) * g_grams_per_count
+                + g_manual_offset;
 
-        d.weight_g = grams;
+        if(grams < 0) grams = 0;
 
-        printf("raw grams = %.3f\n", grams);
+        /* --- TELEMETRY --- */
+        TelemetryPacket pkt{};
+        fill_header(pkt.header, MSG_TELEMETRY);
 
-        // send over UDP
+        strncpy(pkt.name, "Binco1", sizeof(pkt.name));
+        pkt.weight_g = grams;
+        pkt.quantity = 1;
+        pkt.state    = g_state;
+
         sendto(sock,
-               reinterpret_cast<uint8_t*>(&d),
-               sizeof(d),
+               reinterpret_cast<uint8_t*>(&pkt),
+               sizeof(pkt),
                dst_ip,
                dst_port);
 
-        // update LCD only if changed
-        if (memcmp(&d, &last, sizeof(BinData)) != 0) {
-            lcd.clear();
+        /* --- LCD --- */
+        lcd.clear();
 
-            char line0[17];
-            snprintf(line0, sizeof(line0), "%-11sID:%02u", d.name, d.ID);
-            lcd.setCursor(0, 0);
-            lcd.print(line0);
+        char line0[17];
+        snprintf(line0, sizeof(line0), "ID:%02u", g_device_id);
+        lcd.setCursor(0,0);
+        lcd.print(line0);
 
-            char line1[17];
-            snprintf(line1, sizeof(line1), "Qty:%u  W:%.1f",
-                     d.quantity, d.weight_g);
-            lcd.setCursor(0, 1);
-            lcd.print(line1);
+        char line1[17];
+        snprintf(line1, sizeof(line1), "W:%.1fg", grams);
+        lcd.setCursor(0,1);
+        lcd.print(line1);
 
-            last = d;
+        /* --- RECEIVE COMMAND --- */
+        CommandPacket cmd{};
+        uint8_t src_ip[4];
+        uint16_t src_port;
+
+        int len = recvfrom(sock,
+                           reinterpret_cast<uint8_t*>(&cmd),
+                           sizeof(cmd),
+                           src_ip,
+                           &src_port);
+
+        if(len == sizeof(CommandPacket) &&
+           cmd.header.device_id == g_device_id)
+        {
+            switch(cmd.command)
+            {
+                case CMD_LED_SET:
+                    gpio_put(T_LED, cmd.flag);
+                    break;
+
+                case CMD_SET_OFFSET:
+                    g_manual_offset = cmd.value;
+                    break;
+
+                case CMD_TARE:
+                {
+                    g_state = STATE_WAIT_REFERENCE;
+
+                    int64_t sum = 0;
+                    for(int i=0;i<64;i++)
+                    {
+                        while(!adc.available()){}
+                        sum += adc.read();
+                    }
+
+                    g_tare_offset = sum / 64;
+                    break;
+                }
+
+                case CMD_REFERENCE_CAL:
+                {
+                    float ref_weight = cmd.value;
+
+                    int64_t sum = 0;
+                    for(int i=0;i<64;i++)
+                    {
+                        while(!adc.available()){}
+                        sum += adc.read();
+                    }
+
+                    int32_t avg = sum / 64;
+                    int32_t delta = avg - g_tare_offset;
+
+                    if(delta > 0)
+                    {
+                        g_grams_per_count = ref_weight / delta;
+                        g_state = STATE_RUNNING;
+                    }
+                    break;
+                }
+
+                default:
+                    break;
+            }
         }
-
-        sleep_ms(100);  // 10 Hz loop
+        sleep_ms(100);
     }
 }
 
@@ -199,4 +246,27 @@ static void init_i2c_adc() {
     gpio_set_function(ADC_SCL, GPIO_FUNC_I2C);
     gpio_pull_up(ADC_SDA);
     gpio_pull_up(ADC_SCL);
+}
+
+CommandPacket qt_instruction(uint8_t sock)
+{
+    CommandPacket cmd{};
+    uint8_t src_ip[4];
+    uint16_t src_port;
+
+    while (true)
+    {
+        int len = recvfrom(sock,
+                           (uint8_t*)&cmd,
+                           sizeof(cmd),
+                           src_ip,
+                           &src_port);
+
+        if (len == sizeof(CommandPacket))
+        {
+            return cmd;
+        }
+
+        sleep_ms(50);
+    }
 }
