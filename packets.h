@@ -22,6 +22,8 @@ enum CommandType : uint8_t
     CMD_SETUP,
     CMD_RESTART,
     CMD_SET_OFFSET,
+    CMD_SET_UNIT_OFFSET,
+    CMD_SET_UNIT_WEIGHT,
     CMD_LED_SET
 };
 

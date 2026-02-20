@@ -1,7 +1,6 @@
 #include "pico/stdlib.h"
-#include <cstring>
 #include <cstdio>
-#include <cmath>
+#include <cstdarg>
 
 #include "packets.h"
 #include "pinouts.h"
@@ -14,13 +13,13 @@
 #include "hardware/watchdog.h"
 
 // debug helpers
-void wait_for_one(void);
+void wait_for_one();
 
 // helper functions
 static void init_i2c_adc();
 static void send_discovery();
 static bool check_setup_command(CommandPacket &out);
-static void send_console(const char* msg);
+static void send_console(const char* fmt, ...);
 static void check_restart();
 
 CommandPacket qt_instruction(uint8_t sock);
@@ -30,6 +29,9 @@ static uint16_t g_device_id = 1;
 static bool g_is_setup = false;
 static CommandPacket g_cached_cmd{};
 static bool g_has_cached_cmd = false;
+static float g_unit_weight = 0.0f;
+static float g_unit_offset = 0.0f;
+static bool  g_profile_loaded = false;
 
 int main()
 {
@@ -41,7 +43,7 @@ int main()
     /* ---------- LED ---------- */
     gpio_init(T_LED);
     gpio_set_dir(T_LED, GPIO_OUT);
-    gpio_put(T_LED, 0);
+    gpio_put(T_LED, false);
 
     /* ---------- ADC ---------- */
     init_i2c_adc();
@@ -102,16 +104,53 @@ int main()
                 g_is_setup = true;
                 //printf("Setup command received\n");
                 send_console("Setup command received\n");
+                send_console("Waiting for Profile");
             }
         }
 
         sleep_ms(500);
     }
 
+    /* ===== PROFILE PHASE ===== */
+
+    int checksum1 = 0, checksum2 = 0;
+
+    while(!g_profile_loaded)
+    {
+        CommandPacket cmd;
+
+        if(check_setup_command(cmd))
+        {
+            if(cmd.command == CMD_SET_UNIT_WEIGHT)
+            {
+                g_unit_weight = cmd.value;
+                checksum1 = 1;
+                send_console("Unit weight OK");
+            }
+            else if(cmd.command == CMD_SET_UNIT_OFFSET)
+            {
+                g_unit_offset = cmd.value;
+                checksum2 = 1;
+                send_console("Unit offset OK");
+            }
+
+            // ✅ completion check must be OUTSIDE command matching
+            if(checksum1 && checksum2)
+            {
+                g_profile_loaded = true;
+                send_console("Profile fully loaded");
+            }
+        }
+
+        sleep_ms(50);
+    }
+
     CommandPacket cmd;
 
-
 /* ===== WAIT ZERO CALIBRATE ===== */
+
+    send_console("Unit Weight = %.3f", g_unit_weight);
+    send_console("Unit Offset = %.3f", g_unit_offset);
 
     //printf("Remove all weight\n");
     send_console("Remove all weight\n");
@@ -344,15 +383,21 @@ static bool check_setup_command(CommandPacket &out)
     return true;
 }
 
-static void send_console(const char* msg)
+static void send_console(const char* fmt, ...)
 {
     ConsolePacket pkt{};
-
     pkt.ID = g_device_id;
 
-    std::snprintf(pkt.text, sizeof(pkt.text), "%s", msg);
+    char buffer[64];
 
-    uint8_t qt_ip[4] = {192,168,10,1};   // Qt host
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buffer, sizeof(buffer), fmt, args);
+    va_end(args);
+
+    std::snprintf(pkt.text, sizeof(pkt.text), "%s", buffer);
+
+    uint8_t qt_ip[4] = {192,168,10,1};
     uint16_t qt_port = 5001;
 
     sendto(
