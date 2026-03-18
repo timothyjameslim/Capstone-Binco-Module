@@ -1,7 +1,7 @@
 #include "pico/stdlib.h"
 #include <cstdio>
 #include <cstdarg>
-
+#include <cstring>
 #include "packets.h"
 #include "pinouts.h"
 #include "drivers/w5500.h"
@@ -25,25 +25,34 @@ static void check_restart();
 CommandPacket qt_instruction(uint8_t sock);
 
 constexpr uint8_t DATA_SOCK = 0;
-static uint16_t g_device_id = 1;
+static uint16_t g_device_id = 0;
 static bool g_is_setup = false;
 static CommandPacket g_cached_cmd{};
 static bool g_has_cached_cmd = false;
-static float g_unit_weight = 0.0f;
-static float g_unit_offset = 0.0f;
+static float g_unit_weight = 6.56f;
+static float g_unit_offset = 0.02f;
 static bool  g_profile_loaded = false;
 
 int main()
 {
     stdio_init_all();
-    sleep_ms(100);
-    ////printf("BINCO BOOT\n");
+    printf("BINCO BOOT\n");
     send_console("BINCO BOOT\n");
 
     /* ---------- LED ---------- */
-    gpio_init(T_LED);
-    gpio_set_dir(T_LED, GPIO_OUT);
-    gpio_put(T_LED, false);
+    //gpio_init(T_LED);
+    //gpio_set_dir(T_LED, GPIO_OUT);
+    //gpio_put(T_LED, false);
+
+    /* ---------- LCD ---------- */
+    LCD1602 lcd;
+    printf("Starting LCD Init\n");
+    lcd.init();
+    printf("LCD Init Complete\n");
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("BINCO READY");
+    sleep_ms(1000);
 
     /* ---------- ADC ---------- */
     init_i2c_adc();
@@ -51,43 +60,57 @@ int main()
     Adafruit_NAU7802 adc;
     if (!adc.begin(i2c1))
     {
-        ////printf("ADC Init Failed\n");
+        printf("ADC Init Failed\n");
         send_console("ADC Init Failed\n");
         while(true);
     }
 
     adc.calibrate(NAU7802_CALMOD_INTERNAL);
 
-    ////printf("Waiting Setup\n");
+    printf("Waiting Setup\n");
     send_console("Waiting Setup\n");
 
     /* ---------- NETWORK ---------- */
     if (!w5500_init())
     {
-        ////printf("W5500 Init Failed\n");
+        printf("W5500 Init Failed\n");
         send_console("W5500 Init Failed\n");
         while(true);
     }
 
     if (socket(DATA_SOCK, Sn_MR_UDP, 5001, 0) != DATA_SOCK)
     {
-        //printf("Socket Init Failed\n");
+        printf("Socket Init Failed\n");
         send_console("Socket Init Failed\n");
         while(true);
     }
 
-//    printf("Network Ready\n");
+    printf("Network Ready\n");
     send_console("Network Ready\n");
     wiz_NetInfo netinfo;
     ctlnetwork(CN_GET_NETINFO, &netinfo);
 
-//    printf("IP: %d.%d.%d.%d\n",
-//           netinfo.ip[0], netinfo.ip[1],
-//           netinfo.ip[2], netinfo.ip[3]);
-//
-//    printf("MASK: %d.%d.%d.%d\n",
-//           netinfo.sn[0], netinfo.sn[1],
-//           netinfo.sn[2], netinfo.sn[3]);
+    printf("IP: %d.%d.%d.%d\n",
+           netinfo.ip[0], netinfo.ip[1],
+           netinfo.ip[2], netinfo.ip[3]);
+
+    printf("MASK: %d.%d.%d.%d\n",
+           netinfo.sn[0], netinfo.sn[1],
+           netinfo.sn[2], netinfo.sn[3]);
+
+    uint8_t last_octet = netinfo.ip[3];
+    const uint8_t BASE_IP = 111;
+
+    if (last_octet >= BASE_IP)
+    {
+        g_device_id = last_octet - BASE_IP + 1;
+    }
+    else
+    {
+        g_device_id = 1;
+    }
+
+    printf("Derived BINCO ID: %d\n", g_device_id);
 
     /* ===== DISCOVERY PHASE ===== */
 
@@ -102,9 +125,9 @@ int main()
             if(setup_cmd.command == CMD_SETUP)
             {
                 g_is_setup = true;
-                //printf("Setup command received\n");
+                printf("Setup command received\n");
                 send_console("Setup command received\n");
-                send_console("Waiting for Profile");
+                //send_console("Waiting for Profile");
             }
         }
 
@@ -113,7 +136,10 @@ int main()
 
     /* ===== PROFILE PHASE ===== */
 
-    int checksum1 = 0, checksum2 = 0;
+    int got_weight = 0;
+    int got_offset = 0;
+
+    printf("Waiting Profile\n");
 
     while(!g_profile_loaded)
     {
@@ -121,24 +147,23 @@ int main()
 
         if(check_setup_command(cmd))
         {
+            printf("PROFILE cmd=%d val=%.3f\n", cmd.command, cmd.value);
+
             if(cmd.command == CMD_SET_UNIT_WEIGHT)
             {
                 g_unit_weight = cmd.value;
-                checksum1 = 1;
-                send_console("Unit weight OK");
+                got_weight = 1;
             }
             else if(cmd.command == CMD_SET_UNIT_OFFSET)
             {
                 g_unit_offset = cmd.value;
-                checksum2 = 1;
-                send_console("Unit offset OK");
+                got_offset = 1;
             }
 
-            // ✅ completion check must be OUTSIDE command matching
-            if(checksum1 && checksum2)
+            if(got_weight && got_offset)
             {
                 g_profile_loaded = true;
-                send_console("Profile fully loaded");
+                printf("Profile loaded\n");
             }
         }
 
@@ -165,6 +190,7 @@ int main()
     } while(cmd.command != CMD_CALI);
 
     //printf("CMD_CALI RECEIVED\n");
+    send_console("Please wait\n");
 
     const int SAMPLES = 64;
 
@@ -194,7 +220,7 @@ int main()
         cmd = qt_instruction(DATA_SOCK);
     } while(cmd.command != CMD_TARE);
 
-    //printf("CMD_TARE RECEIVED\n");
+    printf("CMD_TARE RECEIVED\n");
     send_console("Please wait\n");
 
     int64_t cal_sum = 0;
@@ -220,17 +246,17 @@ int main()
         }
     }
 
-    float grams_per_count = 5.3f / delta;
+    float grams_per_count = g_unit_weight / delta;
 
     //printf("Calibration OK\n");
     send_console("Calibration OK\n");
-    //printf("grams_per_count = %.8f\n", grams_per_count);
+    printf("grams_per_count = %.8f\n", grams_per_count);
     char msg[64];
-    //printf(msg, sizeof(msg), "grams_per_count = %.8f", grams_per_count);
+    printf(msg, sizeof(msg), "grams_per_count = %.8f", grams_per_count);
     send_console(msg);
 
-    BincoData data{};
-    const char nm[] = "Binco1";
+    BincoData data{}, last{};
+    const char nm[] = "binco4";
     for(int i = 0; i < 16 && nm[i]; ++i)
         data.name[i] = nm[i];
 
@@ -251,10 +277,35 @@ int main()
         if(grams < 0)
             grams = 0;
 
+        // ---- quantity estimation ----
+        float adjusted = grams - g_unit_offset;
+        if (adjusted < 0) adjusted = 0;
+
+        uint32_t qty = (uint32_t)(adjusted / g_unit_weight + 0.5f);
+
+        send_console("Weight %f\n", grams);
         /* --- Fill packet --- */
         data.weight_g = grams;
-        data.quantity = 0;      // update if needed later
+        data.quantity = qty;      // update if needed later
         data.state    = STATE_RUNNING;
+
+        // update LCD only if changed
+        if (memcmp(&data, &last, sizeof(BincoData)) != 0) {
+            lcd.clear();
+
+            char line0[17];
+            snprintf(line0, sizeof(line0), "%-11sID:%02u", data.name, data.ID);
+            lcd.setCursor(0, 0);
+            lcd.print(line0);
+
+            char line1[17];
+            snprintf(line1, sizeof(line1), "Qty:%u  W:%.1f",
+                     data.quantity, data.weight_g);
+            lcd.setCursor(0, 1);
+            lcd.print(line1);
+
+            last = data;
+        }
 
         /* --- Send to Qt --- */
         uint8_t qt_ip[4] = {192,168,10,1};
@@ -288,6 +339,17 @@ void wait_for_one()
 
 static void init_i2c_adc()
 {
+    printf("Scanning I2C...\n");
+
+    for (uint8_t addr = 1; addr < 127; addr++)
+    {
+        int ret = i2c_write_blocking(i2c1, addr, nullptr, 0, false);
+        if (ret >= 0)
+        {
+            printf("Found device at 0x%02X\n", addr);
+        }
+    }
+
     i2c_init(i2c1, 400 * 1000);
 
     gpio_set_function(ADC_SDA, GPIO_FUNC_I2C);
@@ -336,15 +398,16 @@ static void send_discovery()
     uint8_t dst_ip[4] = {192,168,10,1};
     uint16_t dst_port = 5001;
 
+    printf("Discovery Mode\n");
 
-    const char nm[] = "Binco1";
+    const char nm[] = "binco4";
     for(int i = 0; i <16 && nm[i]; ++i) data.name[i] = nm[i];
     data.ID = g_device_id;
     data.quantity  = 0;
     data.weight_g  = 0.0f;
     data.state     = STATE_IDLE;
 
-    uint8_t broadcast_ip[4] = {192,168,255,255};
+    uint8_t broadcast_ip[4] = {192,168,10,1};
 
     int ret = sendto(
             DATA_SOCK,
@@ -377,6 +440,11 @@ static bool check_setup_command(CommandPacket &out)
     if(len != sizeof(CommandPacket))
         return false;
 
+    /* allow any ID until profile is fully loaded */
+    if (!g_profile_loaded)
+        return true;
+
+    /* after profile load, enforce ID match */
     if(out.ID != g_device_id)
         return false;
 

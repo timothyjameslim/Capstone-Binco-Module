@@ -30,9 +30,9 @@
 
 // Waveshare LCD1602
 //GPIO 10 (Pin 17)
-#define LCD_SDA            10
+#define LCD_SDA            12
 // GPIO 11 (Pin 16)
-#define LCD_SCL            11
+#define LCD_SCL            13
 
 // Adafruit ADC & Loadcell Sensor
 //GPIO 26 (Pin 31)
