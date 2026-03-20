@@ -399,8 +399,7 @@ CommandPacket qt_instruction(uint8_t sock)
         // Reject commands that require profile before it is loaded
         bool requires_profile =
             (g_cached_cmd.command == CMD_CALI) ||
-            (g_cached_cmd.command == CMD_TARE) ||
-            (g_cached_cmd.command == CMD_START);
+            (g_cached_cmd.command == CMD_TARE);
 
         if (requires_profile && !g_profile_loaded) {
             send_console("Rejected cmd=%d, profile not loaded", g_cached_cmd.command);
@@ -436,8 +435,7 @@ CommandPacket qt_instruction(uint8_t sock)
             // Reject commands that require profile before it is loaded
             bool requires_profile =
                 (cmd.command == CMD_CALI) ||
-                (cmd.command == CMD_TARE) ||
-                (cmd.command == CMD_START);
+                (cmd.command == CMD_TARE);
 
             if (requires_profile && !g_profile_loaded) {
                 send_console("Rejected cmd=%d, profile not loaded", cmd.command);
