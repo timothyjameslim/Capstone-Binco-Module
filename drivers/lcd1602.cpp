@@ -14,7 +14,7 @@ LCD1602::LCD1602()
 {}
 
 void LCD1602::init() {
-    // init I2C1 on GP14/GP15
+    // init I2C1 on GP12/GP13
     i2c_init(LCD_I2C, 100000);
     gpio_set_function(LCD_SDA, GPIO_FUNC_I2C);
     gpio_set_function(LCD_SCL, GPIO_FUNC_I2C);

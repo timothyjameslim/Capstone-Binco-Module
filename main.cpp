@@ -114,6 +114,7 @@ int main()
     }
 
     printf("Derived BINCO ID: %d\n", g_device_id);
+    printf("Firmware Version: SpiceEarth 1.2\n");
 
     /* ===== DISCOVERY PHASE ===== */
 
@@ -259,7 +260,7 @@ int main()
     send_console(msg);
 
     BincoData data{}, last{};
-    const char nm[] = "binco3";
+    const char nm[] = "Binco1";
     for(int i = 0; i < 16 && nm[i]; ++i)
         data.name[i] = nm[i];
 
@@ -363,30 +364,20 @@ void wait_for_one()
 
 static void init_i2c_adc()
 {
-    printf("Scanning I2C...\n");
-
-    for (uint8_t addr = 1; addr < 127; addr++)
-    {
-        int ret = i2c_write_blocking(i2c1, addr, nullptr, 0, false);
-        if (ret >= 0)
-        {
-            printf("Found device at 0x%02X\n", addr);
-        }
-    }
-
-    i2c_init(i2c1, 400 * 1000);
-
+    i2c_init(i2c1, 100 * 1000);
     gpio_set_function(ADC_SDA, GPIO_FUNC_I2C);
     gpio_set_function(ADC_SCL, GPIO_FUNC_I2C);
-
     gpio_pull_up(ADC_SDA);
     gpio_pull_up(ADC_SCL);
+
 }
+
 
 CommandPacket qt_instruction(uint8_t sock)
 {
     // If check_restart() already consumed a command that isn't restart,
     // return it here first.
+    send_console("Instruction Received");
     if (g_has_cached_cmd) {
         g_has_cached_cmd = false;
 
@@ -457,7 +448,7 @@ static void send_discovery()
 
     printf("Discovery Mode\n");
 
-    const char nm[] = "binco3";
+    const char nm[] = "Binco1";
     for(int i = 0; i <16 && nm[i]; ++i) data.name[i] = nm[i];
     data.ID = g_device_id;
     data.quantity  = 0;
