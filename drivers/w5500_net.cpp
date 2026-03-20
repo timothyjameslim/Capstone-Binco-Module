@@ -27,7 +27,7 @@ extern "C" int w5500_init(void){
     // 3) Set network parameters
     wiz_NetInfo net = {
             .mac  = {0x00,0x08,0xDC,0x11,0x22,0x44},
-            .ip   = {192,168,1,114},
+            .ip   = {192,168,1,113},
             .sn   = {255,255,0,0},
             .gw   = {192,168,1,1},
             .dns  = {192,168,1,1},

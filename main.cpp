@@ -1,4 +1,5 @@
 #include "pico/stdlib.h"
+#include <cmath>
 #include <cstdio>
 #include <cstdarg>
 #include <cstring>
@@ -21,7 +22,6 @@ static void send_discovery();
 static bool check_setup_command(CommandPacket &out);
 static void send_console(const char* fmt, ...);
 static void check_restart();
-
 CommandPacket qt_instruction(uint8_t sock);
 
 constexpr uint8_t DATA_SOCK = 0;
@@ -31,6 +31,8 @@ static CommandPacket g_cached_cmd{};
 static bool g_has_cached_cmd = false;
 static float g_unit_weight = 6.56f;
 static float g_unit_offset = 0.02f;
+float filtered_grams = 0.0f;
+const float alpha = 0.2f;   // 0.1–0.3 (lower = smoother)
 static bool  g_profile_loaded = false;
 
 int main()
@@ -64,6 +66,7 @@ int main()
         send_console("ADC Init Failed\n");
         while(true);
     }
+    printf("ADC Init success\n");
 
     adc.calibrate(NAU7802_CALMOD_INTERNAL);
 
@@ -256,7 +259,7 @@ int main()
     send_console(msg);
 
     BincoData data{}, last{};
-    const char nm[] = "binco4";
+    const char nm[] = "binco3";
     for(int i = 0; i < 16 && nm[i]; ++i)
         data.name[i] = nm[i];
 
@@ -265,31 +268,54 @@ int main()
     while(true)
     {
         check_restart();
-        /* --- Read ADC --- */
+
         while (!adc.available()) {
             check_restart();
         }
 
         int32_t raw = adc.read();
 
-        float grams = (raw - tare_offset) * grams_per_count;
+        float grams_raw = (raw - tare_offset) * grams_per_count;
+        if (grams_raw < 0) grams_raw = 0;
 
-        if(grams < 0)
-            grams = 0;
+        static float filtered_grams = 0.0f;
+        static bool filter_init = false;
 
-        // ---- quantity estimation ----
-        float adjusted = grams - g_unit_offset;
-        if (adjusted < 0) adjusted = 0;
+        if (!filter_init) {
+            filtered_grams = grams_raw;
+            filter_init = true;
+        } else {
+            filtered_grams = alpha * grams_raw + (1.0f - alpha) * filtered_grams;
+        }
 
-        uint32_t qty = (uint32_t)(adjusted / g_unit_weight + 0.5f);
+        float grams = filtered_grams;
 
-        send_console("Weight %f\n", grams);
-        /* --- Fill packet --- */
-        data.weight_g = grams;
-        data.quantity = qty;      // update if needed later
-        data.state    = STATE_RUNNING;
+        float display_weight = roundf(grams * 100.0f) / 100.0f;
 
-        // update LCD only if changed
+        float unit_nominal = g_unit_weight;
+        float tolerance = g_unit_offset;
+
+        uint32_t qty_up = (uint32_t)ceilf(grams / unit_nominal);
+
+        uint32_t qty = 0;
+        if (qty_up == 0) {
+            qty = 0;
+        } else {
+            float unit_actual = grams / qty_up;
+
+            if (fabs(unit_actual - unit_nominal) <= tolerance) {
+                qty = qty_up;
+            } else {
+                qty = qty_up - 1;
+            }
+        }
+
+        send_console("Weight %.2f", display_weight);
+
+        data.weight_g = display_weight;
+        data.quantity = qty;
+        data.state = STATE_RUNNING;
+
         if (memcmp(&data, &last, sizeof(BincoData)) != 0) {
             lcd.clear();
 
@@ -299,7 +325,7 @@ int main()
             lcd.print(line0);
 
             char line1[17];
-            snprintf(line1, sizeof(line1), "Qty:%u  W:%.1f",
+            snprintf(line1, sizeof(line1), "Qty:%u W:%.1f",
                      data.quantity, data.weight_g);
             lcd.setCursor(0, 1);
             lcd.print(line1);
@@ -307,19 +333,17 @@ int main()
             last = data;
         }
 
-        /* --- Send to Qt --- */
         uint8_t qt_ip[4] = {192,168,10,1};
 
         sendto(
-                DATA_SOCK,
-                (uint8_t*)&data,
-                sizeof(data),
-                qt_ip,
-                5001
+            DATA_SOCK,
+            (uint8_t*)&data,
+            sizeof(data),
+            qt_ip,
+            5001
         );
 
-        sleep_ms(100);   // update rate
-
+        sleep_ms(100);
     }
 }
 
@@ -365,6 +389,25 @@ CommandPacket qt_instruction(uint8_t sock)
     // return it here first.
     if (g_has_cached_cmd) {
         g_has_cached_cmd = false;
+
+        // Reject cached packet if it is not for this Binco
+        if (g_cached_cmd.ID != g_device_id) {
+            CommandPacket invalid{};
+            return invalid;
+        }
+
+        // Reject commands that require profile before it is loaded
+        bool requires_profile =
+            (g_cached_cmd.command == CMD_CALI) ||
+            (g_cached_cmd.command == CMD_TARE) ||
+            (g_cached_cmd.command == CMD_START);
+
+        if (requires_profile && !g_profile_loaded) {
+            send_console("Rejected cmd=%d, profile not loaded", g_cached_cmd.command);
+            CommandPacket invalid{};
+            return invalid;
+        }
+
         return g_cached_cmd;
     }
 
@@ -385,6 +428,22 @@ CommandPacket qt_instruction(uint8_t sock)
 
         if (len == sizeof(CommandPacket))
         {
+            // Ignore packets not meant for this Binco
+            if (cmd.ID != g_device_id) {
+                continue;
+            }
+
+            // Reject commands that require profile before it is loaded
+            bool requires_profile =
+                (cmd.command == CMD_CALI) ||
+                (cmd.command == CMD_TARE) ||
+                (cmd.command == CMD_START);
+
+            if (requires_profile && !g_profile_loaded) {
+                send_console("Rejected cmd=%d, profile not loaded", cmd.command);
+                continue;
+            }
+
             return cmd;
         }
 
@@ -400,7 +459,7 @@ static void send_discovery()
 
     printf("Discovery Mode\n");
 
-    const char nm[] = "binco4";
+    const char nm[] = "binco3";
     for(int i = 0; i <16 && nm[i]; ++i) data.name[i] = nm[i];
     data.ID = g_device_id;
     data.quantity  = 0;
@@ -439,10 +498,6 @@ static bool check_setup_command(CommandPacket &out)
 
     if(len != sizeof(CommandPacket))
         return false;
-
-    /* allow any ID until profile is fully loaded */
-    if (!g_profile_loaded)
-        return true;
 
     /* after profile load, enforce ID match */
     if(out.ID != g_device_id)
