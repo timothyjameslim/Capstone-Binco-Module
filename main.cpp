@@ -31,15 +31,15 @@ static CommandPacket g_cached_cmd{};
 static bool g_has_cached_cmd = false;
 static float g_unit_weight = 6.56f;
 static float g_unit_offset = 0.02f;
-float filtered_grams = 0.0f;
 const float alpha = 0.2f;   // 0.1–0.3 (lower = smoother)
 static bool  g_profile_loaded = false;
+static volatile bool g_do_tare = false;
+static volatile bool g_do_recal = false;
 
 int main()
 {
     stdio_init_all();
     printf("BINCO BOOT\n");
-    send_console("BINCO BOOT\n");
 
     /* ---------- LED ---------- */
     //gpio_init(T_LED);
@@ -63,7 +63,6 @@ int main()
     if (!adc.begin(i2c1))
     {
         printf("ADC Init Failed\n");
-        send_console("ADC Init Failed\n");
         while(true);
     }
     printf("ADC Init success\n");
@@ -71,7 +70,6 @@ int main()
     adc.calibrate(NAU7802_CALMOD_INTERNAL);
 
     printf("Waiting Setup\n");
-    send_console("Waiting Setup\n");
 
     /* ---------- NETWORK ---------- */
     if (!w5500_init())
@@ -114,7 +112,7 @@ int main()
     }
 
     printf("Derived BINCO ID: %d\n", g_device_id);
-    printf("Firmware Version: SpiceEarth 1.2\n");
+    printf("Firmware Version: SpiceEarth 1.3\n");
 
     /* ===== DISCOVERY PHASE ===== */
 
@@ -131,11 +129,10 @@ int main()
                 g_is_setup = true;
                 printf("Setup command received\n");
                 send_console("Setup command received\n");
-                //send_console("Waiting for Profile");
+                send_console("Waiting for Profile");
             }
         }
-
-        sleep_ms(500);
+        sleep_ms(1000);
     }
 
     /* ===== PROFILE PHASE ===== */
@@ -144,6 +141,7 @@ int main()
     int got_offset = 0;
 
     printf("Waiting Profile\n");
+    send_console("Waiting Profile\n");
 
     while(!g_profile_loaded)
     {
@@ -151,7 +149,18 @@ int main()
 
         if(check_setup_command(cmd))
         {
-            printf("PROFILE cmd=%d val=%.3f\n", cmd.command, cmd.value);
+            if(cmd.ID != g_device_id)
+            {
+                printf("PROFILE ignored: targetID=%u myID=%u cmd=%d\n",
+                       cmd.ID, g_device_id, cmd.command);
+                send_console("PROFILE ignored: targetID=%u myID=%u cmd=%d\n", cmd.ID, g_device_id, cmd.command);
+                sleep_ms(50);
+                continue;
+            }
+
+            printf("PROFILE accepted: cmd=%d val=%.3f targetID=%u myID=%u\n",
+                   cmd.command, cmd.value, cmd.ID, g_device_id);
+            send_console("PROFILE accepted: targetID=%u cmd=%d val=%.3f\n", cmd.ID, cmd.command, cmd.value);
 
             if(cmd.command == CMD_SET_UNIT_WEIGHT)
             {
@@ -256,11 +265,11 @@ int main()
     send_console("Calibration OK\n");
     printf("grams_per_count = %.8f\n", grams_per_count);
     char msg[64];
-    printf(msg, sizeof(msg), "grams_per_count = %.8f", grams_per_count);
+    snprintf(msg, sizeof(msg), "grams_per_count = %.8f", grams_per_count);
     send_console(msg);
 
     BincoData data{}, last{};
-    const char nm[] = "Binco1";
+    const char nm[] = "Binco3";
     for(int i = 0; i < 16 && nm[i]; ++i)
         data.name[i] = nm[i];
 
@@ -270,6 +279,69 @@ int main()
     {
         check_restart();
 
+        static float filtered_grams = 0.0f;
+        static bool filter_init = false;
+
+        // ===== APPLY RUNTIME TARE =====
+        if (g_do_tare)
+        {
+            const int SAMPLES = 32;
+            int64_t sum = 0;
+
+            for (int i = 0; i < SAMPLES; i++)
+            {
+                while (!adc.available()) {
+                    check_restart();
+                }
+                sum += adc.read();
+            }
+
+            tare_offset = sum / SAMPLES;
+            g_do_tare = false;
+
+            filtered_grams = 0.0f;
+            filter_init = false;
+
+            send_console("Tare updated");
+        }
+
+        // ===== APPLY RUNTIME RECALIBRATION =====
+        if (g_do_recal)
+        {
+            const int SAMPLES = 64;
+            int64_t sum = 0;
+
+            for (int i = 0; i < SAMPLES; i++)
+            {
+                while (!adc.available()) {
+                    check_restart();
+                }
+                sum += adc.read();
+            }
+
+            int32_t cal_avg = sum / SAMPLES;
+            int32_t delta = cal_avg - tare_offset;
+
+            if (delta > 0)
+            {
+                grams_per_count = g_unit_weight / delta;
+
+                send_console("Recal OK");
+                send_console("g_per_cnt=%.6f", grams_per_count);
+            }
+            else
+            {
+                send_console("Recal failed");
+            }
+
+            // reset filter after recal
+            filtered_grams = 0.0f;
+            filter_init = false;
+
+            g_do_recal = false;
+        }
+
+
         while (!adc.available()) {
             check_restart();
         }
@@ -278,9 +350,6 @@ int main()
 
         float grams_raw = (raw - tare_offset) * grams_per_count;
         if (grams_raw < 0) grams_raw = 0;
-
-        static float filtered_grams = 0.0f;
-        static bool filter_init = false;
 
         if (!filter_init) {
             filtered_grams = grams_raw;
@@ -448,7 +517,7 @@ static void send_discovery()
 
     printf("Discovery Mode\n");
 
-    const char nm[] = "Binco1";
+    const char nm[] = "Binco3";
     for(int i = 0; i <16 && nm[i]; ++i) data.name[i] = nm[i];
     data.ID = g_device_id;
     data.quantity  = 0;
@@ -466,7 +535,7 @@ static void send_discovery()
     );
 
     //printf("sendto ret = %d\n", ret);
-    send_console("sendto ret = 25");
+    send_console("sendto ret = %d", ret);
 }
 
 static bool check_setup_command(CommandPacket &out)
@@ -543,6 +612,20 @@ static void check_restart()
     // ignore packets not for this device
     if (cmd.ID != g_device_id)
         return;
+
+    // ===== RUNTIME TARE =====
+    if (cmd.command == CMD_CALI)
+    {
+        g_do_tare = true;
+        return;
+    }
+
+    // runtime recalibration (span)
+    if (cmd.command == CMD_TARE)
+    {
+        g_do_recal = true;
+        return;
+    }
 
     // handle restart
     if (cmd.command == CMD_RESTART)
